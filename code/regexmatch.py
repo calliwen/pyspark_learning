@@ -72,7 +72,12 @@ def regex_match(msg, template_match_dict, optimized):
     if not matched_event:
         matched_event = ('NONE', 'NONE')
     return matched_event
-    
+
+def write_template_freq_df( outdir, template_freq_dict ):
+    template_freq_list = [ "--#--".join([key,val]) for key, val in template_freq_dict.iteritems()]
+    template_freq_df = pd.DataFrame(template_freq_list, columns=['EventId', 'EventTemplate', 'Occurrences'])
+    template_freq_df.to_csv(os.path.join( outdir,  'logfile_templates.csv'), index=False)
+
 
 
 class PatternMatch(object):
@@ -142,15 +147,19 @@ class PatternMatch(object):
         print('Matching event templates...')
         match_list = self.match_event(log_dataframe['Content'].tolist())
         log_dataframe = pd.concat([log_dataframe, pd.DataFrame(match_list, columns=['EventId', 'EventTemplate'])], axis=1)
+        
         self._dump_match_result(os.path.basename(log_filepath), log_dataframe)
+        
         match_rate = sum(log_dataframe['EventId'] != 'NONE') / float(len(log_dataframe))
         print('Matching done, matching rate: {:.1%} [Time taken: {!s}]'.format(match_rate, datetime.now() - start_time))
 
     def _dump_match_result(self, log_filename, log_dataframe):
         log_dataframe.to_csv(os.path.join(self.outdir, log_filename + '_structured.csv'), index=False)
+        
         template_freq_list = [[eventId, template, freq] for (eventId, template), freq in self.template_freq_dict.iteritems()]
         template_freq_df = pd.DataFrame(template_freq_list, columns=['EventId', 'EventTemplate', 'Occurrences'])
         template_freq_df.to_csv(os.path.join(self.outdir, log_filename + '_templates.csv'), index=False)
+
 
     def _generate_hash_eventId(self, template_str):
         return hashlib.md5(template_str.encode('utf-8')).hexdigest()[0:8]

@@ -26,7 +26,7 @@ template matching. The algorithm is described in the following paper:
     "Real-Time Log Event Matching at Scale", XXX, 2018.
 """
 
-from ..utils import logloader
+import logloader
 from collections import defaultdict, Counter, OrderedDict
 import re
 import pandas as pd
@@ -38,6 +38,82 @@ import itertools
 import hashlib
 import string
 import numpy as np
+
+
+
+def message_split(message):
+    message = re.sub(r"<+", " <", message)
+    message = re.sub(r">+", "> ", message)
+    punc = re.sub('[*<>]', "", string.punctuation)
+    splitters = '\s\\' + '\\'.join(punc)
+    splitter_regex = re.compile('[{}]+'.format(splitters))
+    splitter_regex = re.compile('[^*<>A-Za-z]+')
+    tokens = re.split(splitter_regex, message)
+    tokens = [token for idx, token in enumerate(tokens) if token!='' and not (token == "<*>" and idx > 0 and tokens[idx-1]=="<*>")]
+    return tokens
+
+def tree_match(match_tree, log_list):
+    print("Worker {} start matching {} lines.".format(os.getpid(), len(log_list)))
+    log_template_dict = {}
+    for log_content in log_list:
+        # if "Jetty" not in log_content: continue
+        # Full match
+        if log_content in match_tree["$NO_STAR$"]:
+            log_template_dict[log_content] = log_content
+            continue
+        log_tokens = message_split(log_content)
+        template = match_template(match_tree, log_tokens)
+        log_template_dict[log_content] = template if template else "NoMatch"
+    return log_template_dict
+
+def match_template(match_tree, log_tokens):
+    result = []
+    find_template(match_tree, log_tokens, result)
+    if result:
+        result.sort(key=lambda x: (-x[1][0], x[1][1]))
+        return result[0][0]
+    return None
+
+def find_template(move_tree, log_tokens, result):
+    if len(log_tokens) == 0:
+        for key, value in move_tree.items():
+            if isinstance(value, tuple):
+                result.append((key, value))
+        if "<*>" in move_tree:
+            move_tree = move_tree["<*>"]
+            for key, value in move_tree.items():
+                if isinstance(value, tuple):
+                    result.append((key, value))
+        return
+    token = log_tokens[0]
+    # print("---")
+    # print(log_tokens)
+    # print(token)
+    # print(move_tree)
+    # print("---")
+    if token in move_tree:
+        find_template(move_tree[token], log_tokens[1:], result)
+    if "<*>" in move_tree:
+        if isinstance(move_tree["<*>"], dict):
+            next_keys = move_tree["<*>"].keys()
+            next_continue_keys = []
+            for nk in next_keys:
+                nv = move_tree["<*>"][nk]
+                if isinstance(nv, tuple):
+                    result.append((nk, nv))
+                else:
+                    next_continue_keys.append(nk)
+            idx = 0
+            while idx < len(log_tokens):
+                token = log_tokens[idx]
+                if token in next_continue_keys:
+                    find_template(move_tree["<*>"], log_tokens[idx:], result)
+                idx += 1
+            if idx == len(log_tokens):
+                find_template(move_tree, log_tokens[idx+1:], result)
+        else:
+            result.append(("<*>", move_tree["<*>"]))
+
 
 
 class PatternMatch(object):
@@ -54,19 +130,21 @@ class PatternMatch(object):
         loader = logloader.LogLoader(self.logformat, self.n_workers)
         log_dataframe = loader.load_to_dataframe(log_filepath)
 
-
         print('Reading templates from {}...'.format(template_filepath))
         templates = self._read_template_from_csv(template_filepath)
-
         print('Building match tree...')
         match_tree = self._build_match_tree(templates)
 
         print('Matching event templates...')
         match_dict = self.match_event(match_tree, log_dataframe['Content'].tolist())
+        
         log_dataframe['EventTemplate'] = log_dataframe['Content'].map(match_dict)
         log_dataframe['EventId'] = log_dataframe['Content'].map(lambda x: hashlib.md5(x.encode('utf-8')).hexdigest()[0:8])
+        
+        # wrtie csv to path ~ 
         self._dump_match_result(os.path.basename(log_filepath), log_dataframe)
         match_rate = sum(log_dataframe['EventTemplate'] != 'NoMatch') / float(len(log_dataframe))
+        
         print('Matching done, matching rate: {:.1%} [Time taken: {!s}]'.format(match_rate, datetime.now() - start_time))
         return log_dataframe
 
@@ -123,93 +201,4 @@ class PatternMatch(object):
         template_df['EventId'] = template_df['EventTemplate'].map(lambda x: hashlib.md5(x.encode('utf-8')).hexdigest()[0:8])
         template_df['Occurrences'] = template_df['EventTemplate'].map(occ_dict)
         template_df.to_csv(os.path.join(self.outdir, log_filename + '_templates.csv'), index=False, columns=['EventId', 'EventTemplate', 'Occurrences'])
-
-
-def message_split(message):
-    message = re.sub(r"<+", " <", message)
-    message = re.sub(r">+", "> ", message)
-    punc = re.sub('[*<>]', "", string.punctuation)
-    splitters = '\s\\' + '\\'.join(punc)
-    splitter_regex = re.compile('[{}]+'.format(splitters))
-
-    splitter_regex = re.compile('[^*<>A-Za-z]+')
-    tokens = re.split(splitter_regex, message)
-    tokens = [token for idx, token in enumerate(tokens) if token!='' and not (token == "<*>" and idx > 0 and tokens[idx-1]=="<*>")]
-    return tokens
-
-
-
-def tree_match(match_tree, log_list):
-    print("Worker {} start matching {} lines.".format(os.getpid(), len(log_list)))
-    log_template_dict = {}
-    for log_content in log_list:
-
-        # if "Jetty" not in log_content: continue
-        # Full match
-        if log_content in match_tree["$NO_STAR$"]:
-            log_template_dict[log_content] = log_content
-            continue
-
-        log_tokens = message_split(log_content)
-        # print(log_tokens)
-        template = match_template(match_tree, log_tokens)
-        # print(template)
-        # sys.exit()
-        log_template_dict[log_content] = template if template else "NoMatch"
-    return log_template_dict
-
-def match_template(match_tree, log_tokens):
-    result = []
-    find_template(match_tree, log_tokens, result)
-    if result:
-        result.sort(key=lambda x: (-x[1][0], x[1][1]))
-        return result[0][0]
-    return None
-
-def find_template(move_tree, log_tokens, result):
-    if len(log_tokens) == 0:
-        # print(move_tree)
-        for key, value in move_tree.items():
-            if isinstance(value, tuple):
-                result.append((key, value))
-        if "<*>" in move_tree:
-            move_tree = move_tree["<*>"]
-            for key, value in move_tree.items():
-                if isinstance(value, tuple):
-                    result.append((key, value))
-        return
-    token = log_tokens[0]
-
-    # print("---")
-    # print(log_tokens)
-    # print(token)
-    # print(move_tree)
-    # print("---")
-
-
-    if token in move_tree:
-        find_template(move_tree[token], log_tokens[1:], result)
-
-    if "<*>" in move_tree:
-        if isinstance(move_tree["<*>"], dict):
-            next_keys = move_tree["<*>"].keys()
-            next_continue_keys = []
-            for nk in next_keys:
-                nv = move_tree["<*>"][nk]
-                if isinstance(nv, tuple):
-                    result.append((nk, nv))
-                else:
-                    next_continue_keys.append(nk)
-
-            idx = 0
-            while idx < len(log_tokens):
-                token = log_tokens[idx]
-                if token in next_continue_keys:
-                    find_template(move_tree["<*>"], log_tokens[idx:], result)
-                idx += 1
-            if idx == len(log_tokens):
-                find_template(move_tree, log_tokens[idx+1:], result)
-
-        else:
-            result.append(("<*>", move_tree["<*>"]))
 
